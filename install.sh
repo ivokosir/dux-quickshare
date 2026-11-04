@@ -6,6 +6,11 @@ cd "$(dirname "$0")"
 cargo build --release
 install -Dm755 target/release/qsbar "$HOME/.local/bin/qsbar"
 install -Dm644 systemd/qsbar.service "$HOME/.config/systemd/user/qsbar.service"
+install -Dm644 assets/qsbar.svg "$HOME/.local/share/icons/hicolor/scalable/apps/qsbar.svg"
+for size in 48 128 256; do
+  install -Dm644 "assets/qsbar-$size.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/qsbar.png"
+done
+gtk-update-icon-cache -f -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 plugins="$HOME/.config/DankMaterialShell/plugins"
 mkdir -p "$plugins"

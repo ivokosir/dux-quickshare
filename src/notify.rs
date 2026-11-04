@@ -15,7 +15,7 @@ pub struct Note<'a> {
     pub timeout_ms: Option<u32>,
 }
 
-const ICON: &str = "rquickshare";
+const ICON: &str = "qsbar";
 
 /// Shows a notification. Returns its id once the server assigned one;
 /// `on_action` runs with the action key if the user clicks a button.

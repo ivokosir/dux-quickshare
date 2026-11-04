@@ -9,7 +9,7 @@
     "dankbar-widget"
   ],
   "component": "./QuickShareWidget.qml",
-  "icon": "phonelink_ring",
+  "icon": "sync_alt",
   "requires_dms": ">=1.5.0",
   "permissions": [
     "process"

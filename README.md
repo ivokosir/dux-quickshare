@@ -61,8 +61,8 @@ dms ipc call quickshare visibility  # toggle visible/hidden
 ./install.sh
 ```
 
-This builds `qsbar`, installs it to `~/.local/bin`, enables the `qsbar.service`
-user unit, and links the plugin into `~/.config/DankMaterialShell/plugins/quickShareBar`.
+This builds `qsbar`, installs it to `~/.local/bin`, installs the app icon, enables
+the `qsbar.service` user unit, and links the plugin into `~/.config/DankMaterialShell/plugins/quickShareBar`.
 After that, add the **Quick Share** widget to a bar in DMS settings.
 
 If RQuickShare is installed, stop it and turn off its autostart. Two receivers on
@@ -86,6 +86,11 @@ cargo run --release --example send -- 127.0.0.1:<port> photo.jpg
 ```
 
 The port is logged by the daemon on start: `journalctl --user -u qsbar | grep TcpListener`.
+
+## Prebuilt binary
+
+Each [release](../../releases) has a stripped `qsbar-x86_64-linux` binary. Put it at
+`~/.local/bin/qsbar`, then follow the rest of `install.sh` by hand (unit, icon, plugin link).
 
 ## License
 

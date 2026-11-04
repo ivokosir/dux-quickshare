@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import Quickshell.Widgets
@@ -179,14 +180,6 @@ PluginComponent {
 
     // ---- bar pill -----------------------------------------------------------
 
-    readonly property string pillIcon: {
-        if (!up)
-            return "phonelink_off";
-        if (waiting.length > 0 || active.length > 0)
-            return "download";
-        return visibleNow ? "phonelink_ring" : "phonelink_off";
-    }
-
     readonly property color pillColor: {
         if (!up)
             return Theme.error;
@@ -207,17 +200,63 @@ PluginComponent {
 
     readonly property bool pulsing: waiting.length > 0 || nearby
 
-    component PillIcon: DIcon {
-        name: root.pillIcon
+    // Quick Share mark: two arrows inside a broken circle (24x24 grid).
+    // A slash is added when hidden.
+    component QsGlyph: Item {
+        id: g
+
+        property real size: 24
+        property color color: Theme.surfaceText
+        property bool slashed: false
+        property real stroke: 2.1
+
+        width: size
+        height: size
+
+        Shape {
+            width: 24
+            height: 24
+            scale: g.size / 24
+            transformOrigin: Item.TopLeft
+            preferredRendererType: Shape.CurveRenderer
+
+            ShapePath {
+                strokeColor: g.color
+                strokeWidth: g.stroke
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg {
+                    path: "M 3.35 9.5 A 9 9 0 0 1 20.86 10.44 M 20.65 14.5 A 9 9 0 0 1 3.14 13.56 "
+                        + "M 3.35 9.5 L 15.2 9.5 M 12.4 6.7 L 15.2 9.5 L 12.4 12.3 "
+                        + "M 20.65 14.5 L 8.8 14.5 M 11.6 11.7 L 8.8 14.5 L 11.6 17.3"
+                }
+            }
+
+            ShapePath {
+                strokeColor: g.slashed ? g.color : "transparent"
+                strokeWidth: g.stroke
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                PathSvg {
+                    path: "M 3.5 3.5 L 20.5 20.5"
+                }
+            }
+        }
+    }
+
+    component PillIcon: QsGlyph {
+        id: pillGlyph
+
         size: root.iconSize
         color: root.pillColor
-        filled: root.waiting.length > 0
+        slashed: root.up && !root.visibleNow
         opacity: root.up && !root.visibleNow && !root.pulsing ? 0.6 : 1
 
         SequentialAnimation on scale {
             running: root.pulsing
             loops: Animation.Infinite
-            onRunningChanged: if (!running) parent.scale = 1
+            onRunningChanged: if (!running) pillGlyph.scale = 1
             NumberAnimation { to: 1.18; duration: 420; easing.type: Easing.OutQuad }
             NumberAnimation { to: 1.0; duration: 420; easing.type: Easing.InQuad }
             PauseAnimation { duration: 500 }
@@ -811,11 +850,10 @@ PluginComponent {
                         radius: 22
                         color: root.visibleNow ? Theme.primary : Theme.surfaceContainerHigh
 
-                        DIcon {
+                        QsGlyph {
                             anchors.centerIn: parent
-                            name: root.visibleNow ? "phonelink_ring" : "phonelink_off"
-                            size: 22
-                            filled: root.visibleNow
+                            size: 24
+                            slashed: !root.visibleNow
                             color: root.visibleNow ? Theme.onPrimary : (root.up ? Theme.surfaceVariantText : Theme.error)
                         }
                     }
