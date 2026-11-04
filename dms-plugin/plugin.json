@@ -1,0 +1,17 @@
+{
+  "id": "quickShareBar",
+  "name": "Quick Share",
+  "description": "Receive from Android Quick Share in the bar: toggle visibility, copy photos straight to the clipboard",
+  "version": "0.1.0",
+  "author": "quickshare-bar contributors",
+  "type": "widget",
+  "capabilities": [
+    "dankbar-widget"
+  ],
+  "component": "./QuickShareWidget.qml",
+  "icon": "phonelink_ring",
+  "requires_dms": ">=1.5.0",
+  "permissions": [
+    "process"
+  ]
+}

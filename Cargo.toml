@@ -1,0 +1,27 @@
+[package]
+name = "qsbar"
+version = "0.1.0"
+edition = "2021"
+description = "Headless Quick Share receiver for the DankMaterialShell bar"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "qsbar"
+path = "src/main.rs"
+
+[dependencies]
+rqs_lib = { path = "vendor/rqs_lib" }
+anyhow = "1"
+log = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util", "signal", "process", "fs"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+mime_guess = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4

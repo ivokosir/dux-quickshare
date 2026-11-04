@@ -1,0 +1,12 @@
+[Unit]
+Description=Quick Share receiver for the bar (qsbar)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/qsbar daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
