@@ -2,7 +2,7 @@
 name = "qsbar"
 version = "0.1.0"
 edition = "2021"
-description = "Headless Quick Share receiver for the DankMaterialShell bar"
+description = "Headless Quick Share receiver for the Dux Shell bar"
 license = "GPL-3.0-or-later"
 
 [[bin]]

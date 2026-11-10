@@ -39,7 +39,7 @@ pub async fn copy_text(text: &str) -> Result<()> {
     copy_bytes("text/plain;charset=utf-8", text.as_bytes().to_vec()).await
 }
 
-fn encode_uri(path: &Path) -> String {
+pub fn encode_uri(path: &Path) -> String {
     let mut out = String::from("file://");
     for b in path.to_string_lossy().bytes() {
         match b {

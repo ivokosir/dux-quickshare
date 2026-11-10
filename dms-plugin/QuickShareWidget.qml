@@ -21,24 +21,77 @@ PluginComponent {
     readonly property bool temporary: visibleNow && !!st.visible_until
     readonly property bool nearby: up && st.nearby === true && !visibleNow
     readonly property var incoming: up && st.incoming ? st.incoming : []
-    readonly property var waiting: incoming.filter(i => i.state === "waiting")
-    readonly property var active: incoming.filter(i => i.state !== "waiting")
-    readonly property var history: up && st.history ? st.history : []
-    readonly property var trusted: up && st.trusted ? st.trusted : []
     readonly property string deviceName: st.device_name || "this PC"
+
+    // The lists the popout draws. A new array rebuilds every row and button, and
+    // the state arrives several times a second during a transfer, so a list is
+    // only replaced when it really changed. Running transfers are listed by id
+    // and read their numbers from `byId`.
+    property var waiting: []
+    property var activeIds: []
+    property var history: []
+    property var trusted: []
+    property var byId: ({})
+    property var _lastById: ({})
+    property var _sigs: ({})
+
+    function setList(name, value) {
+        const sig = JSON.stringify(value);
+        if (root._sigs[name] === sig)
+            return;
+        root._sigs[name] = sig;
+        root[name] = value;
+    }
+
+    function applyState(next) {
+        const isUp = next.daemon === true;
+        const inc = isUp && next.incoming ? next.incoming : [];
+        const map = {};
+        for (const t of inc)
+            map[t.id] = t;
+        // Transfers that just ended stay readable for one more round, while their
+        // card is being taken down.
+        root.byId = Object.assign({}, root._lastById, map);
+        root._lastById = map;
+        root.st = next;
+        root.setList("waiting", inc.filter(i => i.state === "waiting"));
+        root.setList("activeIds", inc.filter(i => i.state !== "waiting").map(i => i.id));
+        root.setList("history", isUp && next.history ? next.history : []);
+        root.setList("trusted", isUp && next.trusted ? next.trusted : []);
+    }
 
     readonly property real activeProgress: {
         let total = 0, done = 0;
-        for (const t of active) {
+        for (const t of incoming) {
+            if (t.state === "waiting")
+                continue;
             total += Number(t.total_bytes) || 0;
             done += Number(t.ack_bytes) || 0;
         }
         return total > 0 ? Math.min(1, done / total) : 0;
     }
 
+    // A command that failed says so (in the same spot as "Copied").
+    property string failNote: ""
+
     function run(args) {
-        Quickshell.execDetached([root.bin].concat(args));
+        Proc.runCommand(null, [root.bin].concat(args), (out, code) => {
+            if (code !== 0) {
+                root.failNote = "That didn't work";
+                failTimer.restart();
+            }
+        }, 0, 30000, root);
     }
+
+    Timer {
+        id: failTimer
+        interval: 4000
+        onTriggered: root.failNote = ""
+    }
+
+    // What the status chip says: the daemon's message, or a failed click.
+    readonly property string note: up && st.status ? st.status : failNote
+    readonly property bool noteBad: up && st.status ? st.status_bad === true : failNote !== ""
 
     function fileUrl(path) {
         return "file://" + String(path).split("/").map(encodeURIComponent).join("/");
@@ -133,12 +186,12 @@ PluginComponent {
         stdout: SplitParser {
             onRead: data => {
                 try {
-                    root.st = JSON.parse(data);
+                    root.applyState(JSON.parse(data));
                 } catch (e) {}
             }
         }
         onExited: {
-            root.st = { daemon: false };
+            root.applyState({ daemon: false });
             restartWatcher.start();
         }
     }
@@ -149,16 +202,18 @@ PluginComponent {
         onTriggered: watcher.running = true
     }
 
+    // The clock behind "Visible for 4:12" and "5 min ago": only while one of them shows.
     Timer {
         interval: 1000
         repeat: true
-        running: root.temporary || root.history.length > 0
+        running: root.temporary || (root.interactionActive && root.history.length > 0)
+        triggeredOnStart: true
         onTriggered: root.nowMs = Date.now()
     }
 
     pillRightClickAction: () => root.run([root.visibleNow ? "hidden" : "visible"])
 
-    // dms ipc call quickshare open | close | toggle  (bind these in niri)
+    // dms ipc call quickshare open | close | toggle | visibility  (bind these in niri)
     IpcHandler {
         target: "quickshare"
 
@@ -183,7 +238,7 @@ PluginComponent {
     readonly property color pillColor: {
         if (!up)
             return Theme.error;
-        if (waiting.length > 0 || active.length > 0)
+        if (waiting.length > 0 || activeIds.length > 0)
             return Theme.primary;
         if (nearby)
             return Theme.warning;
@@ -191,7 +246,7 @@ PluginComponent {
     }
 
     readonly property string pillLabel: {
-        if (active.length > 0)
+        if (activeIds.length > 0)
             return Math.round(activeProgress * 100) + "%";
         if (temporary)
             return Math.max(1, Math.ceil((Number(st.visible_until) - nowMs) / 60000)) + "m";
@@ -354,7 +409,7 @@ PluginComponent {
         }
     }
 
-    // DMS's own button: its tooltip draws in an overlay, so the
+    // The shell's own button: its tooltip draws in an overlay, so the
     // scrolling list cannot clip it.
     component IconBtn: DActionButton {
         property string tip: ""
@@ -545,7 +600,7 @@ PluginComponent {
                 }
 
                 Item {
-                    width: parent.width - x - declineBtn.width
+                    width: Math.max(0, parent.width - x - declineBtn.width - parent.spacing)
                     height: 1
                 }
 
@@ -563,6 +618,8 @@ PluginComponent {
                 height: 22
 
                 Row {
+                    id: trustLine
+                    width: parent.width
                     spacing: 6
                     anchors.verticalCenter: parent.verticalCenter
 
@@ -574,6 +631,10 @@ PluginComponent {
                     }
 
                     StyledText {
+                        // A long phone name ends in "…" instead of leaving the card.
+                        width: Math.min(implicitWidth, trustLine.width - 22)
+                        elide: Text.ElideRight
+                        wrapMode: Text.NoWrap
                         text: "Always accept from " + rc.t.device
                         font.pixelSize: Theme.fontSizeSmall
                         font.underline: trustMouse.containsMouse
@@ -931,7 +992,7 @@ PluginComponent {
                 }
 
                 Column {
-                    visible: root.waiting.length > 0 || root.active.length > 0
+                    visible: root.waiting.length > 0 || root.activeIds.length > 0
                     x: Theme.spacingS
                     width: parent.width - Theme.spacingS * 2
                     spacing: Theme.spacingS
@@ -946,40 +1007,49 @@ PluginComponent {
                     }
 
                     Repeater {
-                        model: root.active
+                        model: root.activeIds
 
                         delegate: ProgressCard {
                             required property var modelData
-                            t: modelData
+                            t: root.byId[modelData] || ({ files: [] })
                         }
                     }
                 }
 
-                // Quick confirmation from the daemon ("Copied", "Saved to Downloads").
+                // Quick word from the daemon: green for "Copied", "Saved to Downloads",
+                // red when something went wrong.
                 Rectangle {
-                    visible: root.up && !!root.st.status
+                    id: statusChip
+                    readonly property color ink: root.noteBad ? Theme.error : Theme.success
+                    visible: root.note !== ""
                     anchors.horizontalCenter: parent.horizontalCenter
-                    width: statusRow.implicitWidth + Theme.spacingL * 2
+                    // Never wider than the popout: a long error ends in "…".
+                    width: Math.min(statusRow.implicitWidth + Theme.spacingL * 2, parent.width - Theme.spacingS * 2)
                     height: 30
                     radius: 15
-                    color: Theme.withAlpha(Theme.success, 0.15)
+                    color: Theme.withAlpha(ink, 0.15)
 
                     Row {
                         id: statusRow
-                        anchors.centerIn: parent
+                        x: Theme.spacingL
+                        anchors.verticalCenter: parent.verticalCenter
                         spacing: 6
 
                         DIcon {
-                            name: "check_circle"
+                            name: root.noteBad ? "error" : "check_circle"
                             size: 16
-                            color: Theme.success
+                            color: statusChip.ink
                             anchors.verticalCenter: parent.verticalCenter
                         }
 
                         StyledText {
-                            text: root.st.status || ""
+                            width: Math.min(implicitWidth, statusChip.parent.width - Theme.spacingS * 2 - Theme.spacingL * 2 - 22)
+                            text: root.note
+                            textFormat: Text.PlainText
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.surfaceText
+                            elide: Text.ElideRight
+                            wrapMode: Text.NoWrap
                             anchors.verticalCenter: parent.verticalCenter
                         }
                     }
@@ -1159,6 +1229,10 @@ PluginComponent {
                                 spacing: 4
 
                                 StyledText {
+                                    // A long phone name ends in "…".
+                                    width: Math.min(implicitWidth, 220)
+                                    elide: Text.ElideRight
+                                    wrapMode: Text.NoWrap
                                     text: modelData
                                     font.pixelSize: Theme.fontSizeSmall
                                     color: Theme.surfaceText

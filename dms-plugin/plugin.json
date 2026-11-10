@@ -3,14 +3,14 @@
   "name": "Quick Share",
   "description": "Receive from Android Quick Share in the bar: toggle visibility, copy photos straight to the clipboard",
   "version": "0.1.0",
-  "author": "quickshare-bar contributors",
+  "author": "dux-quickshare contributors",
   "type": "widget",
   "capabilities": [
     "dankbar-widget"
   ],
   "component": "./QuickShareWidget.qml",
   "icon": "sync_alt",
-  "requires_dms": ">=1.5.0",
+  "requires_dms": ">=1.7.0",
   "permissions": [
     "process"
   ]

@@ -103,12 +103,18 @@ struct Inner {
     last_nearby_note: u64,
     incoming: Vec<Incoming>,
     status: Option<String>,
+    /// The status is a problem, not a confirmation (the bar shows it in red).
+    status_bad: bool,
+    /// When progress was last sent to the bar (it gets at most ~5 a second).
+    last_progress: u64,
 }
 
 pub struct Core {
     lib_tx: broadcast::Sender<ChannelMessage>,
     visibility: Arc<Mutex<watch::Sender<Visibility>>>,
     inner: Mutex<Inner>,
+    /// One publish at a time; holds what was last written to state.json.
+    saved: Mutex<String>,
     snapshot: watch::Sender<String>,
     device_name: String,
 }
@@ -165,6 +171,23 @@ fn find_staged(name: &str) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// Deletes what has arrived so far of a transfer that will not finish.
+fn remove_staged(files: &[String]) {
+    for name in files {
+        if let Some(p) = find_staged(name) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// A received file name must be a plain name: no folders, no "..", not absolute.
+/// The library joins it onto the staging folder as it is.
+fn is_plain_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None))
+        && !name.contains(['/', '\\', '\0'])
+}
+
 fn find_staged_in(dir: &Path, name: &str, best: &mut Option<(SystemTime, PathBuf)>) {
     let mut consider = |p: PathBuf| {
         if let Ok(meta) = std::fs::metadata(&p) {
@@ -203,6 +226,7 @@ impl Core {
             "incoming": inner.incoming,
             "history": inner.persist.history,
             "status": status,
+            "status_bad": inner.status_bad,
             "downloads": paths::downloads_dir(),
         })
         .to_string()
@@ -210,27 +234,57 @@ impl Core {
 
     /// Publishes the current state to every watcher and saves it.
     fn publish(&self) {
+        // One at a time, so snapshots go out in order and state.json.tmp has one writer.
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         let (snap, persist) = {
             let inner = self.lock();
-            (self.snapshot_of(&inner), serde_json::to_string_pretty(&inner.persist).ok())
+            let mut persist = serde_json::to_value(&inner.persist).unwrap_or(Value::Null);
+            // "Visible for 10 minutes" must not survive a restart as "visible".
+            if inner.visible_until.is_some() {
+                persist["visible"] = json!(false);
+            }
+            (self.snapshot_of(&inner), serde_json::to_string_pretty(&persist).unwrap_or_default())
         };
         self.snapshot.send_replace(snap);
-        if let Some(text) = persist {
+        // Progress changes many times a second; the saved state does not.
+        if !persist.is_empty() && *saved != persist {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
             let file = paths::state_file();
             let tmp = file.with_extension("json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(tmp, file);
+            // 0600: history can hold shared text and Wi-Fi passwords.
+            let written = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .and_then(|mut f| f.write_all(persist.as_bytes()));
+            if written.is_ok() && std::fs::rename(&tmp, &file).is_ok() {
+                *saved = persist;
             }
         }
     }
 
     fn set_status(self: &Arc<Self>, text: impl Into<String>) {
-        let text = text.into();
-        self.lock().status = Some(text.clone());
+        self.show_status(text.into(), false);
+    }
+
+    /// A status the bar shows in red.
+    fn set_problem(self: &Arc<Self>, text: impl Into<String>) {
+        self.show_status(text.into(), true);
+    }
+
+    fn show_status(self: &Arc<Self>, text: String, bad: bool) {
+        {
+            let mut inner = self.lock();
+            inner.status = Some(text.clone());
+            inner.status_bad = bad;
+        }
         self.publish();
         let me = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            tokio::time::sleep(Duration::from_secs(if bad { 8 } else { 4 })).await;
             let mut inner = me.lock();
             if inner.status.as_deref() == Some(text.as_str()) {
                 inner.status = None;
@@ -262,7 +316,8 @@ impl Core {
     fn set_visible_for(self: &Arc<Self>, minutes: u64) {
         let gen = {
             let mut inner = self.lock();
-            // Only "visible for a while": a restart comes back hidden.
+            // Only "visible for a while": publish() saves it as hidden, so a restart
+            // comes back hidden.
             inner.persist.visible = true;
             inner.visible_until = Some(now_ms() + minutes * 60_000);
             inner.temp_gen += 1;
@@ -272,8 +327,17 @@ impl Core {
         self.apply_visibility(true);
         self.publish();
         let me = self.clone();
+        let until = now_ms() + minutes * 60_000;
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(minutes * 60)).await;
+            // Short steps against the wall clock: one long sleep would not count
+            // the time the laptop was suspended.
+            loop {
+                let left = until.saturating_sub(now_ms());
+                if left == 0 || me.lock().temp_gen != gen {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(left.min(15_000))).await;
+            }
             let still = me.lock().temp_gen == gen;
             if still {
                 me.set_visible(false);
@@ -314,16 +378,21 @@ impl Core {
     }
 
     fn reject(self: &Arc<Self>, id: &str) -> Result<()> {
-        let (notif, waiting) = {
+        let inc = {
             let mut inner = self.lock();
             let pos = inner.incoming.iter().position(|i| i.id == id).ok_or_else(|| anyhow!("no such transfer"))?;
-            let inc = inner.incoming.remove(pos);
-            (inc.notif, inc.state == "waiting")
+            inner.incoming.remove(pos)
         };
-        if let Some(n) = notif {
+        let waiting = inc.state == "waiting";
+        if let Some(n) = inc.notif {
             notify::close(n);
         }
         self.send_lib(id, if waiting { ChannelAction::RejectTransfer } else { ChannelAction::CancelTransfer });
+        // The library's own "cancelled" message finds nothing to clean up (the
+        // transfer is already gone from the list), so drop the partial files here.
+        if !waiting {
+            remove_staged(&inc.files);
+        }
         self.publish();
         Ok(())
     }
@@ -339,15 +408,26 @@ impl Core {
         match msg.state {
             Some(State::WaitingForUserConsent) => self.on_request(&msg.id, &meta).await,
             Some(State::ReceivingFiles) => {
-                {
+                let tell = {
                     let mut inner = self.lock();
+                    let mut started = false;
                     if let Some(inc) = inner.incoming.iter_mut().find(|i| i.id == msg.id) {
+                        started = inc.state != "receiving";
                         inc.state = "receiving".into();
                         inc.total_bytes = meta["total_bytes"].as_u64().unwrap_or(inc.total_bytes);
                         inc.ack_bytes = meta["ack_bytes"].as_u64().unwrap_or(inc.ack_bytes);
                     }
+                    // The library reports every chunk; the bar only needs a few a second.
+                    let now = now_ms();
+                    let due = started || now.saturating_sub(inner.last_progress) >= 200;
+                    if due {
+                        inner.last_progress = now;
+                    }
+                    due
+                };
+                if tell {
+                    self.publish();
                 }
-                self.publish();
             }
             Some(State::Finished) => {
                 let me = self.clone();
@@ -355,7 +435,7 @@ impl Core {
                 tokio::spawn(async move {
                     if let Err(e) = me.on_finished(&id, &meta).await {
                         error!("finishing {id}: {e:#}");
-                        me.set_status(format!("Something went wrong: {e}"));
+                        me.set_problem(format!("Something went wrong: {e}"));
                     }
                 });
             }
@@ -371,13 +451,11 @@ impl Core {
                     if let Some(n) = inc.notif {
                         notify::close(n);
                     }
-                    for name in &inc.files {
-                        if let Some(p) = find_staged(name) {
-                            let _ = std::fs::remove_file(p);
-                        }
-                    }
+                    // A transfer still waiting for an answer has no file yet; a same-named
+                    // file in staging would belong to another transfer.
                     if inc.state == "receiving" {
-                        self.set_status(format!("Transfer from {} stopped", inc.device));
+                        remove_staged(&inc.files);
+                        self.set_problem(format!("Transfer from {} stopped", inc.device));
                     }
                     self.publish();
                 }
@@ -392,6 +470,12 @@ impl Core {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
+        if let Some(bad) = files.iter().find(|f| !is_plain_name(f)) {
+            warn!("declined {id} from {device}: unsafe file name {bad:?}");
+            self.send_lib(id, ChannelAction::RejectTransfer);
+            self.set_problem(format!("Declined {device}: unsafe file name"));
+            return;
+        }
         let kind = kind_of(&files).to_string();
         let text = meta["text_description"].as_str().map(String::from);
         let trusted = {
@@ -527,7 +611,6 @@ impl Core {
         } else {
             (inc.text.clone().unwrap_or_else(|| payload.clone()), payload.clone())
         };
-        clip::copy_text(&to_copy).await?;
         self.push_history(vec![Item {
             id: uuid::Uuid::new_v4().to_string(),
             kind: kind.into(),
@@ -539,6 +622,8 @@ impl Core {
             time: now_ms(),
             saved: false,
         }]);
+        // It is in the bar's history now, so a clipboard failure does not lose it.
+        clip::copy_text(&to_copy).await.context("couldn't copy; the text is kept in the bar")?;
         let (summary, actions): (&str, Vec<(&str, &str)>) = match kind {
             "url" => ("Link copied", vec![("open", "Open")]),
             "wifi" => ("Wi-Fi password copied", vec![]),
@@ -572,20 +657,35 @@ impl Core {
         std::fs::create_dir_all(&bucket)?;
         let downloads = paths::downloads_dir();
         let mut items = vec![];
+        let mut save_failed = false;
         for name in &inc.files {
             let Some(staged) = find_staged(name) else {
                 warn!("received file {name} not found in staging");
                 continue;
             };
             let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
-            let (dest, saved) = match action {
-                Action::Save => {
-                    std::fs::create_dir_all(&downloads)?;
-                    (unique_path(&downloads, name), true)
-                }
-                Action::Copy => (bucket.join(name), false),
+            let to_downloads = || -> Result<PathBuf> {
+                std::fs::create_dir_all(&downloads)?;
+                let dest = unique_path(&downloads, name);
+                move_file(&staged, &dest)?;
+                Ok(dest)
             };
-            move_file(&staged, &dest)?;
+            let (dest, saved) = match if action == Action::Save { to_downloads().map(Some) } else { Ok(None) } {
+                Ok(Some(dest)) => (dest, true),
+                other => {
+                    // Copy, or Downloads could not take it: keep it for the bar.
+                    if let Err(e) = other {
+                        warn!("saving {name}: {e:#}");
+                        save_failed = true;
+                    }
+                    let dest = bucket.join(name);
+                    if let Err(e) = move_file(&staged, &dest) {
+                        warn!("keeping {name}: {e:#}");
+                        continue;
+                    }
+                    (dest, false)
+                }
+            };
             items.push(Item {
                 id: uuid::Uuid::new_v4().to_string(),
                 kind: if clip::is_image(name) { "image".into() } else { "file".into() },
@@ -610,8 +710,13 @@ impl Core {
         let last_path = PathBuf::from(items.last().unwrap().path.clone().unwrap_or_default());
         let all_paths: Vec<PathBuf> = items.iter().filter_map(|i| i.path.clone().map(PathBuf::from)).collect();
         let image_path = items.iter().rev().find(|i| i.kind == "image").and_then(|i| i.path.clone()).map(PathBuf::from);
+        // For the notification's Save button: these items, whatever arrives meanwhile.
+        let item_ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
         // Newest first in history, keeping the phone's order within a transfer.
         self.push_history(items.into_iter().rev().collect());
+        if save_failed {
+            return Err(anyhow!("couldn't save to Downloads; the files are kept in the bar"));
+        }
 
         let (summary, body, actions): (String, String, Vec<(&str, &str)>) = match action {
             Action::Copy => {
@@ -645,10 +750,6 @@ impl Core {
 
         let me = self.clone();
         let reveal_path = last_path.clone();
-        let item_ids: Vec<String> = {
-            let inner = self.lock();
-            inner.persist.history.iter().take(count).map(|i| i.id.clone()).collect()
-        };
         notify::show(
             notify::Note {
                 summary: &summary,
@@ -894,7 +995,7 @@ fn spawn_detached(program: &str, args: &[&str]) {
 
 /// Opens the file manager with the file selected.
 fn reveal(path: &Path) {
-    let uri = format!("file://{}", path.display());
+    let uri = clip::encode_uri(path);
     let status = std::process::Command::new("busctl")
         .args([
             "--user",
@@ -992,7 +1093,10 @@ pub async fn run() -> Result<()> {
             last_nearby_note: 0,
             incoming: vec![],
             status: None,
+            status_bad: false,
+            last_progress: 0,
         }),
+        saved: Mutex::new(String::new()),
         snapshot: watch::channel(String::new()).0,
         device_name: paths::hostname(),
     });
@@ -1052,4 +1156,23 @@ pub async fn run() -> Result<()> {
     let _ = std::fs::remove_file(&sock);
     rqs.stop().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plain_name;
+
+    #[test]
+    fn plain_names_pass() {
+        for name in ["photo.jpg", "My file (1).pdf", "a..b", ".hidden", "čaj.txt"] {
+            assert!(is_plain_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn names_that_leave_the_folder_are_refused() {
+        for name in ["", ".", "..", "../x", "a/b", "/etc/passwd", "a\\b", "x/../../y", "dir/"] {
+            assert!(!is_plain_name(name), "{name}");
+        }
+    }
 }

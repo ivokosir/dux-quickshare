@@ -1,7 +1,7 @@
-# quickshare-bar
+# dux-quickshare
 
 Receive files from Android **Quick Share** without a window. Everything happens
-in your [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) bar.
+in your [Dux Shell](https://github.com/duxlabs-dev/dux-shell) bar (the `dms` command, once DankMaterialShell).
 
 - **One-click visibility:** right-click the bar icon to switch between visible and hidden.
   The popup also has *Hidden · 10 min · Visible*.
@@ -23,7 +23,7 @@ protocol library (`rqs_lib`) is vendored and runs headless in a small daemon.
 ## How it works
 
 ```
-phone ──Quick Share──▶ qsbar daemon (Rust, rqs_lib) ──unix socket──▶ DMS bar plugin (QML)
+phone ──Quick Share──▶ qsbar daemon (Rust, rqs_lib) ──unix socket──▶ bar plugin (QML)
                               │
                               ├─ wl-copy      (clipboard)
                               └─ notify-send  (notifications with actions)
@@ -49,7 +49,7 @@ dms ipc call quickshare visibility  # toggle visible/hidden
 
 ## Requirements
 
-- Linux on Wayland, with [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell) ≥ 1.5
+- Linux on Wayland, with [Dux Shell](https://github.com/duxlabs-dev/dux-shell) (`dms` ≥ 1.7)
 - `wl-clipboard`, `libnotify` (`notify-send`), `systemd` (user services, `busctl`)
 - Rust toolchain, `protobuf` (`protoc`) and `dbus` headers to build
 - Optional: `imagemagick` to copy HEIC/AVIF photos; BlueZ for the "phone nearby" hint
@@ -62,8 +62,8 @@ dms ipc call quickshare visibility  # toggle visible/hidden
 ```
 
 This builds `qsbar`, installs it to `~/.local/bin`, installs the app icon, enables
-the `qsbar.service` user unit, and links the plugin into `~/.config/DankMaterialShell/plugins/quickShareBar`.
-After that, add the **Quick Share** widget to a bar in DMS settings.
+the `qsbar.service` user unit, and links the plugin into `~/.config/dms/plugins/quickShareBar`.
+After that, add the **Quick Share** widget to a bar in the shell's settings.
 
 If RQuickShare is installed, stop it and turn off its autostart. Two receivers on
 one machine show up twice on the phone.
