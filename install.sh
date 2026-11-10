@@ -12,10 +12,13 @@ for size in 48 128 256; do
 done
 gtk-update-icon-cache -f -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
-# Dux Shell keeps its config in ~/.config/dms (older DankMaterialShell: ~/.config/DankMaterialShell).
+# Dux Shell keeps its config in ~/.config/dms. Only an existing older setup
+# (DankMaterialShell, no dms folder yet) still uses the old place.
 conf="${XDG_CONFIG_HOME:-$HOME/.config}"
 shell_conf="$conf/dms"
-[[ -d "$shell_conf" ]] || shell_conf="$conf/DankMaterialShell"
+if [[ ! -d "$shell_conf" && -d "$conf/DankMaterialShell" ]]; then
+  shell_conf="$conf/DankMaterialShell"
+fi
 plugins="$shell_conf/plugins"
 mkdir -p "$plugins"
 ln -sfn "$PWD/dms-plugin" "$plugins/quickShareBar"

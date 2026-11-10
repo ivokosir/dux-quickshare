@@ -53,6 +53,51 @@ pub fn encode_uri(path: &Path) -> String {
 }
 
 /// Copies files so a file manager or chat app can paste them.
+/// After a file moved: if the clipboard still offers it under the old path,
+/// offer it under the new one instead. Leaves any other clipboard alone.
+pub async fn follow_moved_file(old: &Path, new: &Path) -> Result<()> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        Command::new("wl-paste")
+            .args(["--no-newline", "--type", "text/uri-list"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await??;
+    let list = String::from_utf8_lossy(&out.stdout);
+    let old_uri = encode_uri(old);
+    if !out.status.success() || !list.lines().any(|l| l.trim() == old_uri) {
+        return Ok(());
+    }
+    let paths: Vec<PathBuf> = list
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| if l == old_uri { new.to_path_buf() } else { PathBuf::from(decode_uri(l)) })
+        .collect();
+    copy_files(&paths).await
+}
+
+fn decode_uri(uri: &str) -> String {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri).as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            let hex = std::str::from_utf8(&raw[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            if let Some(byte) = hex {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub async fn copy_files(paths: &[PathBuf]) -> Result<()> {
     let list: String = paths.iter().map(|p| encode_uri(p) + "\r\n").collect();
     copy_bytes("text/uri-list", list.into_bytes()).await
@@ -114,4 +159,18 @@ pub async fn copy_image(path: &Path) -> Result<()> {
         }
     };
     copy_bytes("image/png", png).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_uri, encode_uri};
+    use std::path::Path;
+
+    #[test]
+    fn uri_round_trip() {
+        for path in ["/home/me/Downloads/a b (1).pdf", "/tmp/čaj #1 100%.txt", "/plain/name.jpg"] {
+            assert_eq!(decode_uri(&encode_uri(Path::new(path))), path);
+        }
+        assert_eq!(decode_uri("file:///a%2"), "/a%2");
+    }
 }

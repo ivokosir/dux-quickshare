@@ -157,7 +157,15 @@ fn move_file(from: &Path, to: &Path) -> Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    std::fs::copy(from, to).with_context(|| format!("copy {from:?} -> {to:?}"))?;
+    // Copy next to the destination first: a copy that fails halfway (disk full)
+    // must not leave a cut-off file under the real name.
+    let name = to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let part = to.with_file_name(format!(".{name}.part"));
+    let done = std::fs::copy(from, &part).and_then(|_| std::fs::rename(&part, to));
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&part);
+        return Err(e).with_context(|| format!("copy {from:?} -> {to:?}"));
+    }
     let _ = std::fs::remove_file(from);
     Ok(())
 }
@@ -354,6 +362,14 @@ impl Core {
         });
     }
 
+    /// Deletes what arrived of a transfer that will not finish, except names that
+    /// another transfer in the list is using right now (staging is one folder).
+    fn remove_partial(&self, files: &[String]) {
+        let in_use: Vec<String> = self.lock().incoming.iter().flat_map(|i| i.files.clone()).collect();
+        let mine: Vec<String> = files.iter().filter(|f| !in_use.contains(f)).cloned().collect();
+        remove_staged(&mine);
+    }
+
     fn accept(self: &Arc<Self>, id: &str, action: Option<Action>) -> Result<()> {
         let notif = {
             let mut inner = self.lock();
@@ -390,8 +406,16 @@ impl Core {
         self.send_lib(id, if waiting { ChannelAction::RejectTransfer } else { ChannelAction::CancelTransfer });
         // The library's own "cancelled" message finds nothing to clean up (the
         // transfer is already gone from the list), so drop the partial files here.
+        // And once more a moment later: a cancel right after accepting can arrive
+        // before the library has created the files.
         if !waiting {
-            remove_staged(&inc.files);
+            self.remove_partial(&inc.files);
+            let me = self.clone();
+            let files = inc.files.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                me.remove_partial(&files);
+            });
         }
         self.publish();
         Ok(())
@@ -454,7 +478,7 @@ impl Core {
                     // A transfer still waiting for an answer has no file yet; a same-named
                     // file in staging would belong to another transfer.
                     if inc.state == "receiving" {
-                        remove_staged(&inc.files);
+                        self.remove_partial(&inc.files);
                         self.set_problem(format!("Transfer from {} stopped", inc.device));
                     }
                     self.publish();
@@ -568,7 +592,7 @@ impl Core {
         self.publish();
         let action = inc.action.unwrap_or_else(|| default_action(&inc.kind));
         let result = if inc.files.is_empty() {
-            self.finish_text(&inc, meta).await
+            self.finish_text(&inc, meta, action).await
         } else {
             self.finish_files(&inc, action).await
         };
@@ -579,12 +603,14 @@ impl Core {
 
     fn push_history(&self, items: Vec<Item>) {
         let mut dropped = vec![];
+        // What just arrived is never trimmed away (its files are about to be copied).
+        let limit = HISTORY_LIMIT.max(items.len());
         {
             let mut inner = self.lock();
             for item in items {
                 inner.persist.history.insert(0, item);
             }
-            while inner.persist.history.len() > HISTORY_LIMIT {
+            while inner.persist.history.len() > limit {
                 if let Some(old) = inner.persist.history.pop() {
                     dropped.push(old);
                 }
@@ -595,7 +621,7 @@ impl Core {
         }
     }
 
-    async fn finish_text(self: &Arc<Self>, inc: &Incoming, meta: &Value) -> Result<()> {
+    async fn finish_text(self: &Arc<Self>, inc: &Incoming, meta: &Value, action: Action) -> Result<()> {
         let payload = meta["text_payload"].as_str().unwrap_or("").to_string();
         let kind = match meta["text_type"].as_str() {
             Some("Url") => "url",
@@ -611,8 +637,9 @@ impl Core {
         } else {
             (inc.text.clone().unwrap_or_else(|| payload.clone()), payload.clone())
         };
+        let item_id = uuid::Uuid::new_v4().to_string();
         self.push_history(vec![Item {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: item_id.clone(),
             kind: kind.into(),
             name,
             path: None,
@@ -622,6 +649,17 @@ impl Core {
             time: now_ms(),
             saved: false,
         }]);
+        // You chose Save: it becomes a text file in Downloads instead of a clipboard entry.
+        if action == Action::Save {
+            self.save_item(&item_id)?;
+            let shown: String = payload.chars().take(120).collect();
+            notify::show(
+                notify::Note { summary: "Saved to Downloads", body: &shown, image: None, actions: &[], critical: false, timeout_ms: Some(5000) },
+                |_| {},
+            )
+            .await;
+            return Ok(());
+        }
         // It is in the bar's history now, so a clipboard failure does not lose it.
         clip::copy_text(&to_copy).await.context("couldn't copy; the text is kept in the bar")?;
         let (summary, actions): (&str, Vec<(&str, &str)>) = match kind {
@@ -826,6 +864,12 @@ impl Core {
                 if let Some(parent) = Path::new(p).parent() {
                     let _ = std::fs::remove_dir(parent);
                 }
+                // If the clipboard holds this file (Copy, then Save), a paste would
+                // now point at nothing: point it at the saved file.
+                let (old, new) = (PathBuf::from(p), dest.clone());
+                tokio::spawn(async move {
+                    let _ = clip::follow_moved_file(&old, &new).await;
+                });
                 dest
             }
             (None, Some(t)) => {
@@ -945,6 +989,7 @@ impl Core {
             "open" => {
                 let item = self.item(&s("item"))?;
                 match (item.path, item.text) {
+                    (Some(p), _) if !Path::new(&p).exists() => return Err(anyhow!("file is gone")),
                     (Some(p), _) => spawn_detached("xdg-open", &[&p]),
                     (None, Some(t)) if item.kind == "url" => spawn_detached("xdg-open", &[&t]),
                     _ => return Err(anyhow!("nothing to open")),
@@ -953,6 +998,7 @@ impl Core {
             "reveal" => {
                 let item = self.item(&s("item"))?;
                 match item.path {
+                    Some(p) if !Path::new(&p).exists() => return Err(anyhow!("file is gone")),
                     Some(p) => reveal(Path::new(&p)),
                     None => return Err(anyhow!("not a file")),
                 }
@@ -1059,6 +1105,11 @@ pub async fn run() -> Result<()> {
     let _ = std::fs::remove_dir_all(paths::big_staging_dir());
     std::fs::create_dir_all(&staging)?;
     std::fs::create_dir_all(paths::big_staging_dir())?;
+    // Big transfers pass through the disk cache: nobody else gets to read them.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(paths::cache_dir(), std::fs::Permissions::from_mode(0o700));
+    }
     rqs_lib::set_large_download(Some(paths::big_staging_dir()), RAM_LIMIT);
     std::fs::create_dir_all(paths::files_dir())?;
     // Copied files never persist on disk: drop old disk copies on start.

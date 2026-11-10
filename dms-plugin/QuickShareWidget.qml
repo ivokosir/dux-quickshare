@@ -71,8 +71,23 @@ PluginComponent {
         return total > 0 ? Math.min(1, done / total) : 0;
     }
 
+    // Recent: 5 rows, or all of them after "Show N more".
+    property bool showAll: false
+    // "Delete all?" is being asked in the list header.
+    property bool confirmClear: false
+
+    onInteractionActiveChanged: {
+        if (!interactionActive) {
+            root.confirmClear = false;
+            root.showAll = false;
+        }
+    }
+
     // A command that failed says so (in the same spot as "Copied").
     property string failNote: ""
+    // Kept while the message fades out: [text, is it bad].
+    property var lastNote: ["", false]
+    onNoteChanged: if (note !== "") lastNote = [note, noteBad]
 
     function run(args) {
         Proc.runCommand(null, [root.bin].concat(args), (out, code) => {
@@ -416,7 +431,7 @@ PluginComponent {
 
         iconSize: 18
         iconColor: Theme.surfaceVariantText
-        buttonSize: 30
+        buttonSize: 32
         tooltipText: tip !== "" ? tip : null
         tooltipSide: "top"
     }
@@ -745,16 +760,20 @@ PluginComponent {
         }
     }
 
+    // One received thing. Same shape as a row in the dictate plugin's lists.
+    // Click opens it in its app (a link in the browser); text has nothing to
+    // open, so a click copies it.
     component HistoryRow: Item {
         id: hr
 
         property var item
         readonly property bool isImage: item.kind === "image"
         readonly property bool hasFile: !!item.path
+        readonly property bool opens: hasFile || item.kind === "url"
         readonly property bool hovered: rowHover.hovered
 
         width: parent ? parent.width : 0
-        height: 56
+        height: 54
 
         HoverHandler {
             id: rowHover
@@ -771,15 +790,23 @@ PluginComponent {
             id: rowMouse
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.run(["copy", hr.item.id])
+            onClicked: {
+                if (hr.opens) {
+                    root.run(["open", hr.item.id]);
+                    root.closePopout();
+                } else {
+                    root.run(["copy", hr.item.id]);
+                }
+            }
         }
 
+        // A photo shows itself; everything else is an icon in a circle.
         ClippingRectangle {
             id: thumbBox
             x: Theme.spacingS
-            width: 42
-            height: 42
-            radius: 10
+            width: 36
+            height: 36
+            radius: thumbImg.visible ? 8 : 18
             color: Theme.surfaceContainerHigh
             anchors.verticalCenter: parent.verticalCenter
 
@@ -800,7 +827,7 @@ PluginComponent {
                 anchors.centerIn: parent
                 visible: !thumbImg.visible
                 name: root.kindIcon(hr.item.kind)
-                size: 20
+                size: 18
                 color: Theme.surfaceVariantText
             }
         }
@@ -828,6 +855,7 @@ PluginComponent {
                 width: parent.width
                 text: root.subtitleOf(hr.item)
                 font.pixelSize: Theme.fontSizeSmall
+                font.features: { "tnum": 1 }
                 color: Theme.surfaceVariantText
                 elide: Text.ElideRight
                 wrapMode: Text.NoWrap
@@ -840,7 +868,6 @@ PluginComponent {
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacingXS
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 0
 
             IconBtn {
                 iconName: "content_copy"
@@ -856,16 +883,6 @@ PluginComponent {
             }
 
             IconBtn {
-                visible: hr.hasFile || hr.item.kind === "url"
-                iconName: "open_in_new"
-                tip: "Open"
-                onClicked: {
-                    root.run(["open", hr.item.id]);
-                    root.closePopout();
-                }
-            }
-
-            IconBtn {
                 visible: hr.hasFile
                 iconName: "folder_open"
                 tip: "Show in folder"
@@ -876,8 +893,8 @@ PluginComponent {
             }
 
             IconBtn {
-                iconName: "close"
-                tip: hr.item.saved ? "Remove from list" : "Delete"
+                iconName: "delete"
+                tip: hr.item.saved ? "Remove from the list" : "Delete"
                 onClicked: root.run(["remove", hr.item.id])
             }
         }
@@ -888,9 +905,6 @@ PluginComponent {
     popoutContent: Component {
         PopoutComponent {
             id: popout
-
-            readonly property real maxListHeight: Math.max(220,
-                (popout.parentPopout && popout.parentPopout.screen ? popout.parentPopout.screen.height : 1080) * 0.45)
 
             Column {
                 width: parent.width
@@ -1016,45 +1030,6 @@ PluginComponent {
                     }
                 }
 
-                // Quick word from the daemon: green for "Copied", "Saved to Downloads",
-                // red when something went wrong.
-                Rectangle {
-                    id: statusChip
-                    readonly property color ink: root.noteBad ? Theme.error : Theme.success
-                    visible: root.note !== ""
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    // Never wider than the popout: a long error ends in "…".
-                    width: Math.min(statusRow.implicitWidth + Theme.spacingL * 2, parent.width - Theme.spacingS * 2)
-                    height: 30
-                    radius: 15
-                    color: Theme.withAlpha(ink, 0.15)
-
-                    Row {
-                        id: statusRow
-                        x: Theme.spacingL
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 6
-
-                        DIcon {
-                            name: root.noteBad ? "error" : "check_circle"
-                            size: 16
-                            color: statusChip.ink
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-
-                        StyledText {
-                            width: Math.min(implicitWidth, statusChip.parent.width - Theme.spacingS * 2 - Theme.spacingL * 2 - 22)
-                            text: root.note
-                            textFormat: Text.PlainText
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.surfaceText
-                            elide: Text.ElideRight
-                            wrapMode: Text.NoWrap
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                    }
-                }
-
                 Rectangle {
                     x: Theme.spacingS
                     width: parent.width - Theme.spacingS * 2
@@ -1062,40 +1037,80 @@ PluginComponent {
                     color: Theme.withAlpha(Theme.outline, 0.2)
                 }
 
-                // Recent
+                // Recent: title, the one spot for messages, Open Downloads, Delete all
+                // ("Delete all?" asks first, in the same row).
                 Item {
+                    id: recentHead
                     visible: root.up
                     x: Theme.spacingS
                     width: parent.width - Theme.spacingS * 2
-                    height: 30
+                    height: 32
 
                     StyledText {
-                        anchors.left: parent.left
-                        anchors.leftMargin: Theme.spacingS
+                        id: recentTitle
+                        visible: !root.confirmClear
                         anchors.verticalCenter: parent.verticalCenter
                         text: "Recent"
                         font.pixelSize: Theme.fontSizeMedium
                         font.weight: Font.Medium
-                        color: Theme.surfaceText
-                    }
-
-                    StyledText {
-                        anchors.right: recentActions.left
-                        anchors.rightMargin: Theme.spacingS
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: root.history.length > 0
-                        text: "Click to copy"
-                        font.pixelSize: Theme.fontSizeSmall
                         color: Theme.surfaceVariantText
                     }
 
+                    // A word from the daemon or about a click: green for "Copied",
+                    // "Saved to Downloads", red when something went wrong. It fades in
+                    // place (the two buttons step aside), so nothing moves.
+                    Rectangle {
+                        id: statusChip
+                        readonly property string say: root.note !== "" ? root.note : root.lastNote[0]
+                        readonly property bool bad: root.note !== "" ? root.noteBad : root.lastNote[1]
+                        readonly property color ink: bad ? Theme.error : Theme.success
+                        readonly property real room: recentHead.width - recentTitle.width - Theme.spacingS
+                        visible: !root.confirmClear && opacity > 0
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        // Never wider than the space next to the title: a long text ends in "…".
+                        width: Math.min(statusRow.implicitWidth + Theme.spacingM * 2, room)
+                        height: 26
+                        radius: 13
+                        color: Theme.withAlpha(ink, 0.15)
+                        opacity: root.note !== "" ? 1 : 0
+                        Behavior on opacity {
+                            NumberAnimation { duration: 150 }
+                        }
+
+                        Row {
+                            id: statusRow
+                            x: Theme.spacingM
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+
+                            DIcon {
+                                name: statusChip.bad ? "error" : "check_circle"
+                                size: 16
+                                color: statusChip.ink
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            StyledText {
+                                width: Math.min(implicitWidth, statusChip.room - Theme.spacingM * 2 - 22)
+                                text: statusChip.say
+                                textFormat: Text.PlainText
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: Theme.surfaceText
+                                elide: Text.ElideRight
+                                wrapMode: Text.NoWrap
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+
                     Row {
-                        id: recentActions
+                        visible: !root.confirmClear && root.note === ""
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
 
                         IconBtn {
-                            iconName: "folder_open"
+                            iconName: "folder"
                             tip: "Open Downloads"
                             onClicked: {
                                 root.run(["downloads"]);
@@ -1106,18 +1121,109 @@ PluginComponent {
                         IconBtn {
                             visible: root.history.length > 0
                             iconName: "delete_sweep"
-                            tip: "Clear list"
-                            onClicked: root.run(["clear"])
+                            tip: "Delete all (saved files stay in Downloads)"
+                            onClicked: {
+                                root.confirmClear = true;
+                                confirmTimer.restart();
+                            }
+                        }
+                    }
+
+                    Timer {
+                        id: confirmTimer
+                        interval: 5000
+                        onTriggered: root.confirmClear = false
+                    }
+
+                    Item {
+                        visible: root.confirmClear
+                        anchors.fill: parent
+
+                        Row {
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 8
+
+                            DIcon {
+                                name: "delete_sweep"
+                                size: 18
+                                color: Theme.error
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            StyledText {
+                                text: "Delete all " + root.history.length + "?"
+                                font.pixelSize: Theme.fontSizeMedium
+                                font.weight: Font.Medium
+                                color: Theme.surfaceText
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+
+                        Row {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+
+                            Rectangle {
+                                width: 80
+                                height: 28
+                                radius: 14
+                                color: keepArea.containsMouse ? Theme.withAlpha(Theme.surfaceText, 0.08) : "transparent"
+
+                                StyledText {
+                                    anchors.centerIn: parent
+                                    text: "Cancel"
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    font.weight: Font.Medium
+                                    color: Theme.surfaceVariantText
+                                }
+
+                                MouseArea {
+                                    id: keepArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.confirmClear = false
+                                }
+                            }
+
+                            Rectangle {
+                                width: 76
+                                height: 28
+                                radius: 14
+                                color: delArea.containsMouse ? Theme.withAlpha(Theme.error, 0.26) : Theme.withAlpha(Theme.error, 0.16)
+
+                                StyledText {
+                                    anchors.centerIn: parent
+                                    text: "Delete"
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    font.weight: Font.Medium
+                                    color: Theme.error
+                                }
+
+                                MouseArea {
+                                    id: delArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.confirmClear = false;
+                                        root.showAll = false;
+                                        root.run(["clear"]);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
+                // The newest 5, or all of them with a scroll after "Show N more".
                 Flickable {
                     id: listFlick
                     visible: root.history.length > 0
-                    x: Theme.spacingXS
-                    width: parent.width - Theme.spacingXS * 2
-                    height: Math.min(historyCol.implicitHeight, popout.maxListHeight)
+                    x: Theme.spacingS
+                    width: parent.width - Theme.spacingS * 2
+                    height: Math.min(historyCol.implicitHeight, 54 * (root.showAll ? 7 : 5))
                     contentWidth: width
                     contentHeight: historyCol.implicitHeight
                     clip: true
@@ -1129,13 +1235,38 @@ PluginComponent {
                         width: listFlick.width
 
                         Repeater {
-                            model: root.history
+                            model: root.showAll ? root.history : root.history.slice(0, 5)
 
                             delegate: HistoryRow {
                                 required property var modelData
                                 item: modelData
                             }
                         }
+                    }
+                }
+
+                Rectangle {
+                    visible: root.history.length > 5
+                    x: Theme.spacingS
+                    width: parent.width - Theme.spacingS * 2
+                    height: 34
+                    radius: Theme.cornerRadius
+                    color: moreArea.containsMouse ? Theme.withAlpha(Theme.primary, 0.08) : "transparent"
+
+                    StyledText {
+                        anchors.centerIn: parent
+                        text: root.showAll ? "Show less" : "Show " + (root.history.length - 5) + " more"
+                        font.pixelSize: Theme.fontSizeMedium
+                        font.weight: Font.Medium
+                        color: Theme.primary
+                    }
+
+                    MouseArea {
+                        id: moreArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.showAll = !root.showAll
                     }
                 }
 

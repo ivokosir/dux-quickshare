@@ -11,8 +11,14 @@ in your [Dux Shell](https://github.com/duxlabs-dev/dux-shell) bar (the `dms` com
   and they disappear at logout or reboot.
 - **Save when you want:** *Save* moves the file to your Downloads folder, either right
   away or later from the Recent list.
+- **Recent:** the newest 5 things you received, *Show N more* for the rest. Click one to
+  open it in its app (a link in the browser; text is copied instead). Hover it for
+  Copy, Save, Show in folder and Delete. *Delete all* asks first; saved files stay in Downloads.
+  "Copied" and any problem show at the right end of the Recent row, problems in red.
 - **Notifications with actions:** *Copy / Save / Decline* on every request, with the PIN shown.
-- **Auto-accept** for your own phone ("Always accept from …").
+- **Auto-accept** for your own phone ("Always accept from …"). It goes by the phone's
+  name, which is all Quick Share gives us: another device on your network that takes
+  the same name is accepted too. Use it on networks you trust.
 - Text, links and Wi-Fi passwords sent from the phone are copied too.
 - If a phone tries to share while you are hidden (seen over Bluetooth), you get
   a "Become visible" prompt.
